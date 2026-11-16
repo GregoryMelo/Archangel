@@ -1,0 +1,1437 @@
+<!DOCTYPE html>
+<html lang="pt">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ARCHANGEL — Unidade de Suporte Inteligente para Bombeiros</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- React 18 & ReactDOM 18 -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <!-- Babel Standalone para JSX -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <!-- Three.js -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body { font-family: 'Inter', sans-serif; }
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: #f1f5f9; }
+        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+        ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+        .scanline {
+            background: linear-gradient(to bottom, rgba(255,255,255,0), rgba(255,255,255,0) 50%, rgba(0,0,0,0.16) 50%, rgba(0,0,0,0.16));
+            background-size: 100% 4px;
+        }
+    </style>
+</head>
+<body class="bg-slate-100 text-slate-800 h-screen overflow-hidden">
+    <div id="root" class="h-full w-full"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef, useMemo } = React;
+
+        // ================= DADOS BASE DO QUARTEL E OCORRÊNCIAS =================
+        const BASE_FLEET = { viaturas: 10, caminhoes: 3, bombeiros: 20 };
+
+        // Base Yaw da CAM 01 olhando para o Sul-Leste (PI/4), permitindo +-1.35 radianos (~155° úteis)
+        const BASE_YAW = 0.45;
+        const YAW_LIMIT = 1.35;
+        const PITCH_MIN = -0.85; // Olhando para o chão próximo
+        const PITCH_MAX = -0.15; // Olhando para o horizonte (nunca para o céu)
+
+        // Função auxiliar para calcular Yaw e Pitch exatos da câmera em [0, 17, 0] até o alvo [x, y, z]
+        function computeAnglesToTarget(tx, ty, tz) {
+            const dx = tx - 0;
+            const dy = ty - 17;
+            const dz = tz - 0;
+            const horizDist = Math.sqrt(dx * dx + dz * dz);
+            // Em Three.js com order 'YXZ': forward = (-sin(yaw)*cos(pitch), sin(pitch), -cos(yaw)*cos(pitch))
+            const rawYaw = Math.atan2(-dx, -dz);
+            const rawPitch = Math.atan2(dy, horizDist);
+            // Clamping rígido
+            const clampedYaw = Math.max(BASE_YAW - YAW_LIMIT, Math.min(BASE_YAW + YAW_LIMIT, rawYaw));
+            const clampedPitch = Math.max(PITCH_MIN, Math.min(PITCH_MAX, rawPitch));
+            return { yaw: clampedYaw, pitch: clampedPitch };
+        }
+
+        const INITIAL_INCIDENTS = [
+            {
+                id: "INC-2026-01",
+                title: "Veículo em Chamas na Avenida Norte-Leste",
+                shortTitle: "Incêndio Veicular (Norte-Leste)",
+                location: "Av. Norte-Leste — Km 2,4 (Pista Expressa)",
+                time: "18:52",
+                temp: "480°C",
+                tempNum: 480,
+                severity: "Crítico",
+                coords: [22, 0, -22],
+                fixedCamId: 2,
+                fixedCamLabel: "CAM 02 — Av. Norte-Leste",
+                areaCams: ["CAM 01 (PTZ)", "CAM 02 (Av. Norte-Leste)"],
+                viaturas: 2,
+                caminhoes: 2,
+                bombeiros: 10,
+                samu: true,
+                samuDetail: "SIM — 1 USA (1 vítima com queimaduras leves e inalação)",
+                affectedArea: "180 m² (Pista e canteiro lateral)",
+                vulnerable: "Posto de combustíveis a 95m e rede elétrica aérea",
+                description: "Automóvel em combustão total na faixa norte-leste após colisão. Fumaça densa e risco de vazamento de combustível.",
+                status: "Aguardando Despacho",
+                dispatched: false
+            },
+            {
+                id: "INC-2026-02",
+                title: "Foco de Incêndio na Reserva Florestal Oeste",
+                shortTitle: "Incêndio Florestal (Setor Oeste)",
+                location: "Reserva Florestal Oeste — Trilha Borda Sul",
+                time: "18:41",
+                temp: "340°C",
+                tempNum: 340,
+                severity: "Alto",
+                coords: [-24, 0, -18],
+                fixedCamId: 3,
+                fixedCamLabel: "CAM 03 — Floresta Oeste",
+                areaCams: ["CAM 01 (PTZ)", "CAM 03 (Floresta Oeste)"],
+                viaturas: 2,
+                caminhoes: 1,
+                bombeiros: 8,
+                samu: false,
+                samuDetail: "NÃO — Área de mata sem vítimas civis",
+                affectedArea: "420 m² (Vegetação rasteira e borda de pinheiros)",
+                vulnerable: "Corredor ecológico e residências periféricas a 140m",
+                description: "Foco ativo de queimada na vegetação seca da Reserva Oeste impulsionado por rajadas de vento.",
+                status: "Aguardando Despacho",
+                dispatched: false
+            },
+            {
+                id: "INC-2026-03",
+                title: "Curto-Circuito e Fumaça no Galpão Comercial",
+                shortTitle: "Curto-Circuito (Galpão Sul-Leste)",
+                location: "Galpão Comercial Sul-Leste — Docas 03",
+                time: "18:28",
+                temp: "195°C",
+                tempNum: 195,
+                severity: "Moderado",
+                coords: [22, 0, 22],
+                fixedCamId: 4,
+                fixedCamLabel: "CAM 04 — Setor Comercial Sul-Leste",
+                areaCams: ["CAM 01 (PTZ)", "CAM 04 (Comercial Sul-Leste)"],
+                viaturas: 1,
+                caminhoes: 1,
+                bombeiros: 5,
+                samu: false,
+                samuDetail: "NÃO — Galpão evacuado preventivamente sem feridos",
+                affectedArea: "65 m² (Sala de quadros elétricos e doca)",
+                vulnerable: "Estoque de embalagens no pavilhão anexo",
+                description: "Superaquecimento em transformador interno gerando fumaça densa no Galpão Comercial Sul-Leste.",
+                status: "Aguardando Despacho",
+                dispatched: false
+            }
+        ];
+
+        const SENSORS_LIST = [
+            { id: "SEN-NL-01", name: "Sensor Térmico Av. Norte-Leste", temp: "480°C", smoke: "92%", status: "Crítico", cam: "CAM 02" },
+            { id: "SEN-FO-02", name: "Sensor Florestal Borda Oeste", temp: "340°C", smoke: "78%", status: "Alto", cam: "CAM 03" },
+            { id: "SEN-CS-03", name: "Sensor Galpão Comercial Sul-Leste", temp: "195°C", smoke: "54%", status: "Moderado", cam: "CAM 04" },
+            { id: "SEN-CC-04", name: "Torre Central Cruzamento", temp: "27.4°C", smoke: "2%", status: "Normal", cam: "CAM 01 / CAM 05" },
+            { id: "SEN-SO-05", name: "Setor Residencial Sudoeste", temp: "25.8°C", smoke: "1%", status: "Normal", cam: "CAM 05" },
+            { id: "SEN-NL-06", name: "Viaduto Norte-Leste", temp: "31.2°C", smoke: "8%", status: "Normal", cam: "CAM 02" }
+        ];
+
+        const INITIAL_HISTORY = [
+            { id: "INC-2026-00", title: "Superaquecimento em Transformador", location: "Rua das Acácias, 410", closedAt: "16:10", duration: "28 min", resources: "1 VTR, 1 ABT, 4 Bombeiros", outcome: "Controlado sem danos" },
+            { id: "INC-2025-99", title: "Princípio de Incêndio em Terreno Baldio", location: "Av. Perimetral Sul", closedAt: "13:45", duration: "35 min", resources: "2 VTR, 1 ABT, 6 Bombeiros", outcome: "Extinto totalmente" }
+        ];
+
+        // Componente de Ícone Lucide seguro para React
+        function Icon({ name, className = "w-4 h-4" }) {
+            const ref = useRef(null);
+            useEffect(() => {
+                if (ref.current && window.lucide) {
+                    ref.current.innerHTML = `<i data-lucide="${name}" class="${className}"></i>`;
+                    window.lucide.createIcons({ nodes: [ref.current] });
+                }
+            }, [name, className]);
+            return <span ref={ref} className="inline-flex items-center justify-center shrink-0" />;
+        }
+
+        // ================= APLICAÇÃO PRINCIPAL =================
+        function App() {
+            const [activeTab, setActiveTab] = useState("monitoramento");
+            const [incidents, setIncidents] = useState(INITIAL_INCIDENTS);
+            const [selectedId, setSelectedId] = useState("INC-2026-01");
+            const [severityFilter, setSeverityFilter] = useState("Todos");
+            const [expandedCamId, setExpandedCamId] = useState(null);
+            const [historyList, setHistoryList] = useState(INITIAL_HISTORY);
+            const [clock, setClock] = useState(() => new Date().toTimeString().split(" ")[0]);
+            const [toast, setToast] = useState(null);
+            const [hudAngles, setHudAngles] = useState({ yawDeg: -45, pitchDeg: -29, fov: 46 });
+
+            // Refs para integração fluida com o motor Three.js sem re-renderizar o canvas
+            const mainMountRef = useRef(null);
+            const cam2CanvasRef = useRef(null);
+            const cam3CanvasRef = useRef(null);
+            const cam4CanvasRef = useRef(null);
+            const cam5CanvasRef = useRef(null);
+            const expandedCanvasRef = useRef(null);
+
+            const selectedIncident = useMemo(
+                () => incidents.find(inc => inc.id === selectedId) || incidents[0],
+                [incidents, selectedId]
+            );
+
+            // Cálculo dinâmico do estoque disponível no quartel (10 VTR, 3 Caminhões, 20 Bombeiros)
+            const availableFleet = useMemo(() => {
+                const used = incidents.reduce(
+                    (acc, item) => {
+                        if (item.dispatched) {
+                            acc.viaturas += item.viaturas;
+                            acc.caminhoes += item.caminhoes;
+                            acc.bombeiros += item.bombeiros;
+                        }
+                        return acc;
+                    },
+                    { viaturas: 0, caminhoes: 0, bombeiros: 0 }
+                );
+                return {
+                    viaturas: BASE_FLEET.viaturas - used.viaturas,
+                    caminhoes: BASE_FLEET.caminhoes - used.caminhoes,
+                    bombeiros: BASE_FLEET.bombeiros - used.bombeiros
+                };
+            }, [incidents]);
+
+            // Estado mutável compartilhado com o loop Three.js
+            const threeStateRef = useRef({
+                targetYaw: computeAnglesToTarget(22, 0, -22).yaw,
+                targetPitch: computeAnglesToTarget(22, 0, -22).pitch,
+                currentYaw: computeAnglesToTarget(22, 0, -22).yaw,
+                currentPitch: computeAnglesToTarget(22, 0, -22).pitch,
+                targetFov: 46,
+                currentFov: 46,
+                firePos: new THREE.Vector3(22, 0.2, -22),
+                fireSeverity: "Crítico",
+                expandedCamId: null
+            });
+
+            // Sincronizar seleção de ocorrência com ângulo da CAM 01 e posição do foco 3D
+            useEffect(() => {
+                const [x, y, z] = selectedIncident.coords;
+                const { yaw, pitch } = computeAnglesToTarget(x, y + 1.5, z);
+                threeStateRef.current.targetYaw = yaw;
+                threeStateRef.current.targetPitch = pitch;
+                threeStateRef.current.targetFov = 45;
+                threeStateRef.current.firePos.set(x, 0.2, z);
+                threeStateRef.current.fireSeverity = selectedIncident.severity;
+            }, [selectedIncident]);
+
+            useEffect(() => {
+                threeStateRef.current.expandedCamId = expandedCamId;
+            }, [expandedCamId]);
+
+            // Relógio em tempo real
+            useEffect(() => {
+                const timer = setInterval(() => {
+                    setClock(new Date().toTimeString().split(" ")[0]);
+                }, 1000);
+                return () => clearInterval(timer);
+            }, []);
+
+            const triggerToast = (msg, type = "info") => {
+                setToast({ msg, type });
+                setTimeout(() => setToast(null), 3800);
+            };
+
+            const handleSelectIncident = (inc, goToMonitor = false) => {
+                setSelectedId(inc.id);
+                if (goToMonitor) setActiveTab("monitoramento");
+                triggerToast(`CAM 01 direcionada para ${inc.id} (${inc.fixedCamLabel})`, "info");
+            };
+
+            const handleDispatch = (inc) => {
+                if (inc.dispatched) return;
+                if (
+                    availableFleet.viaturas < inc.viaturas ||
+                    availableFleet.caminhoes < inc.caminhoes ||
+                    availableFleet.bombeiros < inc.bombeiros
+                ) {
+                    triggerToast("Recursos insuficientes no quartel para este despacho!", "error");
+                    return;
+                }
+                setIncidents(prev =>
+                    prev.map(item =>
+                        item.id === inc.id
+                            ? { ...item, dispatched: true, status: "Equipe Despachada" }
+                            : item
+                    )
+                );
+                triggerToast(
+                    `Despacho autorizado (${inc.id}): ${inc.viaturas} VTR, ${inc.caminhoes} Caminhão(ões), ${inc.bombeiros} Bombeiros.`,
+                    "success"
+                );
+            };
+
+            const handleResolveIncident = (inc) => {
+                setIncidents(prev =>
+                    prev.map(item =>
+                        item.id === inc.id
+                            ? { ...item, dispatched: false, status: "Controlado" }
+                            : item
+                    )
+                );
+                setHistoryList(prev => [
+                    {
+                        id: inc.id,
+                        title: inc.title,
+                        location: inc.location,
+                        closedAt: clock.slice(0, 5),
+                        duration: "19 min",
+                        resources: `${inc.viaturas} VTR, ${inc.caminhoes} ABT, ${inc.bombeiros} Bombeiros`,
+                        outcome: "Foco extinto e recursos retornaram ao quartel"
+                    },
+                    ...prev
+                ]);
+                triggerToast(`Ocorrência ${inc.id} finalizada. Recursos devolvidos ao quartel.`, "success");
+            };
+
+            const handleResetAll = () => {
+                setIncidents(INITIAL_INCIDENTS);
+                setSelectedId("INC-2026-01");
+                triggerToast("Cenário e estoque do quartel (10 VTR, 3 ABT, 20 Bombeiros) restaurados.", "info");
+            };
+
+            // ================= MOTOR 3D THREE.JS OTIMIZADO =================
+        useEffect(() => {
+            const container = mainMountRef.current;
+            if (!container) return;
+
+            // 1. Cena & Iluminação
+            const scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x0b1220);
+            scene.fog = new THREE.FogExp2(0x0b1220, 0.0075);
+
+            const ambientLight = new THREE.AmbientLight(0xdbeafe, 0.78);
+            scene.add(ambientLight);
+
+            const dirLight = new THREE.DirectionalLight(0xffffff, 0.88);
+            dirLight.position.set(45, 85, 35);
+            scene.add(dirLight);
+
+            // 2. Construção do Bairro Urbano em Miniatura (4 Setores Bem Definidos)
+            const ground = new THREE.Mesh(
+                new THREE.PlaneGeometry(140, 140),
+                new THREE.MeshStandardMaterial({ color: 0x1e293b, roughness: 0.9 })
+            );
+            ground.rotation.x = -Math.PI / 2;
+            scene.add(ground);
+
+            // Avenidas Cruzando no Centro [0, 0, 0]
+            const roadMat = new THREE.MeshStandardMaterial({ color: 0x0f172a, roughness: 0.85 });
+            const roadNS = new THREE.Mesh(new THREE.PlaneGeometry(14, 140), roadMat);
+            roadNS.rotation.x = -Math.PI / 2;
+            roadNS.position.y = 0.04;
+            scene.add(roadNS);
+
+            const roadEW = new THREE.Mesh(new THREE.PlaneGeometry(140, 14), roadMat);
+            roadEW.rotation.x = -Math.PI / 2;
+            roadEW.position.y = 0.05;
+            scene.add(roadEW);
+
+            // Avenida Diagonal Norte-Leste (onde ocorre INC-2026-01 em [22, 0, -22])
+            const roadDiag = new THREE.Mesh(new THREE.PlaneGeometry(12, 65), roadMat);
+            roadDiag.rotation.x = -Math.PI / 2;
+            roadDiag.rotation.z = -Math.PI / 4;
+            roadDiag.position.set(22, 0.045, -22);
+            scene.add(roadDiag);
+
+            // Faixas amarelas nas vias
+            const stripeMat = new THREE.MeshBasicMaterial({ color: 0xfacc15 });
+            for (let i = -60; i <= 60; i += 8) {
+                if (Math.abs(i) < 10) continue;
+                const s1 = new THREE.Mesh(new THREE.PlaneGeometry(0.3, 3.2), stripeMat);
+                s1.rotation.x = -Math.PI / 2;
+                s1.position.set(0, 0.07, i);
+                const s2 = new THREE.Mesh(new THREE.PlaneGeometry(3.2, 0.3), stripeMat);
+                s2.rotation.x = -Math.PI / 2;
+                s2.position.set(i, 0.07, 0);
+                scene.add(s1, s2);
+            }
+
+            // SETOR NOROESTE [-X, -Z]: RESERVA FLORESTAL OESTE (Local do INC-2026-02 em [-24, 0, -18])
+            const forestGround = new THREE.Mesh(
+                new THREE.PlaneGeometry(54, 54),
+                new THREE.MeshStandardMaterial({ color: 0x14532d, roughness: 0.95 })
+            );
+            forestGround.rotation.x = -Math.PI / 2;
+            forestGround.position.set(-36, 0.06, -36);
+            scene.add(forestGround);
+
+            const trunkGeo = new THREE.CylinderGeometry(0.3, 0.45, 2.6, 6);
+            const trunkMat = new THREE.MeshStandardMaterial({ color: 0x713f12 });
+            const coneGeo = new THREE.ConeGeometry(2.1, 4.8, 7);
+            const treeMatA = new THREE.MeshStandardMaterial({ color: 0x15803d });
+            const treeMatB = new THREE.MeshStandardMaterial({ color: 0x166534 });
+
+            for (let i = 0; i < 34; i++) {
+                const tx = -14 - (i % 6) * 8 + Math.sin(i) * 2;
+                const tz = -13 - Math.floor(i / 6) * 8 + Math.cos(i) * 2;
+                const tree = new THREE.Group();
+                const trunk = new THREE.Mesh(trunkGeo, trunkMat);
+                trunk.position.y = 1.3;
+                const crown = new THREE.Mesh(coneGeo, i % 2 === 0 ? treeMatA : treeMatB);
+                crown.position.y = 4.2;
+                tree.add(trunk, crown);
+                tree.position.set(tx, 0.06, tz);
+                scene.add(tree);
+            }
+
+            // SETOR SUL-LESTE [+X, +Z]: GALPÕES COMERCIAIS (Local do INC-2026-03 em [22, 0, 22])
+            const warehouseSpecs = [
+                { x: 22, z: 22, w: 14, h: 7, d: 12, color: 0x475569, accent: 0xf59e0b },
+                { x: 40, z: 22, w: 13, h: 9, d: 12, color: 0x334155, accent: 0x38bdf8 },
+                { x: 22, z: 40, w: 14, h: 8, d: 12, color: 0x334155, accent: 0x10b981 },
+                { x: 40, z: 40, w: 13, h: 11, d: 12, color: 0x1e293b, accent: 0xf43f5e }
+            ];
+            warehouseSpecs.forEach(wh => {
+                const mesh = new THREE.Mesh(
+                    new THREE.BoxGeometry(wh.w, wh.h, wh.d),
+                    new THREE.MeshStandardMaterial({ color: wh.color })
+                );
+                mesh.position.set(wh.x, wh.h / 2, wh.z);
+                scene.add(mesh);
+
+                const sign = new THREE.Mesh(
+                    new THREE.BoxGeometry(wh.w * 0.65, 1.1, 0.3),
+                    new THREE.MeshBasicMaterial({ color: wh.accent })
+                );
+                sign.position.set(wh.x, wh.h - 1.2, wh.z - wh.d / 2 - 0.2);
+                scene.add(sign);
+            });
+
+            // SETOR NORTE-LESTE [+X, -Z]: POSTO & EDIFÍCIOS PRÓXIMOS À AV. NORTE-LESTE
+            const neBuildings = [
+                { x: 38, z: -16, w: 10, h: 12, d: 10, color: 0x334155 },
+                { x: 16, z: -38, w: 11, h: 14, d: 10, color: 0x475569 }
+            ];
+            neBuildings.forEach(b => {
+                const m = new THREE.Mesh(new THREE.BoxGeometry(b.w, b.h, b.d), new THREE.MeshStandardMaterial({ color: b.color }));
+                m.position.set(b.x, b.h / 2, b.z);
+                scene.add(m);
+            });
+
+            // Veículo incendiado estático na Avenida Norte-Leste [22, 0, -22]
+            const burntCar = new THREE.Group();
+            const carBody = new THREE.Mesh(new THREE.BoxGeometry(2.3, 1.0, 4.4), new THREE.MeshStandardMaterial({ color: 0x1e293b }));
+            carBody.position.y = 0.6;
+            const carCabin = new THREE.Mesh(new THREE.BoxGeometry(1.9, 0.8, 2.2), new THREE.MeshStandardMaterial({ color: 0x0f172a }));
+            carCabin.position.set(0, 1.4, -0.2);
+            burntCar.add(carBody, carCabin);
+            burntCar.rotation.y = Math.PI / 4;
+            burntCar.position.set(22, 0.05, -22);
+            scene.add(burntCar);
+
+            // SETOR SUDOESTE [-X, +Z]: RESIDENCIAL
+            [[-20, 20, 8], [-36, 20, 10], [-20, 36, 9], [-36, 36, 11]].forEach((r, idx) => {
+                const house = new THREE.Mesh(
+                    new THREE.BoxGeometry(10, r[2], 10),
+                    new THREE.MeshStandardMaterial({ color: idx % 2 === 0 ? 0x475569 : 0x334155 })
+                );
+                house.position.set(r[0], r[2] / 2, r[1]);
+                scene.add(house);
+            });
+
+            // POSTE CENTRAL DA CAM 01 EM [0, 17, 0]
+            const centerPole = new THREE.Mesh(
+                new THREE.CylinderGeometry(0.32, 0.45, 16.5, 10),
+                new THREE.MeshStandardMaterial({ color: 0x94a3b8, metalness: 0.7 })
+            );
+            centerPole.position.set(0, 8.25, 0);
+            scene.add(centerPole);
+
+            const domeCap = new THREE.Mesh(
+                new THREE.SphereGeometry(0.75, 12, 12),
+                new THREE.MeshBasicMaterial({ color: 0x38bdf8 })
+            );
+            domeCap.position.set(0, 17, 0);
+            scene.add(domeCap);
+
+            // Veículo patrulha circulando na via Norte-Sul
+            const patrolCar = new THREE.Mesh(
+                new THREE.BoxGeometry(2.1, 1.1, 4.2),
+                new THREE.MeshStandardMaterial({ color: 0x3b82f6 })
+            );
+            patrolCar.position.set(-3.5, 0.6, -50);
+            scene.add(patrolCar);
+
+            // 3. GRUPO DINÂMICO DE INCÊNDIO 3D (CHAMAS, FUMAÇA E ANEL DE RISCO)
+            const fireGroup = new THREE.Group();
+            fireGroup.position.copy(threeStateRef.current.firePos);
+            scene.add(fireGroup);
+
+            const heatDisk = new THREE.Mesh(
+                new THREE.CircleGeometry(7.5, 28),
+                new THREE.MeshBasicMaterial({ color: 0xef4444, transparent: true, opacity: 0.35, side: THREE.DoubleSide })
+            );
+            heatDisk.rotation.x = -Math.PI / 2;
+            heatDisk.position.y = 0.08;
+            fireGroup.add(heatDisk);
+
+            const riskRing = new THREE.Mesh(
+                new THREE.RingGeometry(7.0, 7.6, 32),
+                new THREE.MeshBasicMaterial({ color: 0xef4444, transparent: true, opacity: 0.9, side: THREE.DoubleSide })
+            );
+            riskRing.rotation.x = -Math.PI / 2;
+            riskRing.position.y = 0.12;
+            fireGroup.add(riskRing);
+
+            const flames = [];
+            const flameColors = [0xef4444, 0xf97316, 0xfacc15];
+            for (let f = 0; f < 8; f++) {
+                const cone = new THREE.Mesh(
+                    new THREE.ConeGeometry(0.9 + (f % 3) * 0.3, 3.4 + (f % 2) * 1.4, 6),
+                    new THREE.MeshBasicMaterial({ color: flameColors[f % 3], transparent: true, opacity: 0.92 })
+                );
+                cone.position.set(Math.cos(f) * 1.6, 2.0, Math.sin(f) * 1.6);
+                fireGroup.add(cone);
+                flames.push(cone);
+            }
+
+            const smokes = [];
+            const smokeGeo = new THREE.DodecahedronGeometry(0.9);
+            const smokeMat = new THREE.MeshBasicMaterial({ color: 0x0f172a, transparent: true, opacity: 0.62 });
+            for (let s = 0; s < 10; s++) {
+                const puff = new THREE.Mesh(smokeGeo, smokeMat);
+                puff.position.set(Math.sin(s * 1.7) * 1.8, 2 + s * 1.1, Math.cos(s * 1.7) * 1.8);
+                fireGroup.add(puff);
+                smokes.push(puff);
+            }
+
+            // 4. CONFIGURAÇÃO DA CAM 01 PTZ EM [0, 17, 0] COM ORDEM DE EULER 'YXZ'
+            const initWidth = container.clientWidth || 600;
+            const initHeight = container.clientHeight || 400;
+            const cam01 = new THREE.PerspectiveCamera(46, initWidth / initHeight, 0.5, 350);
+            cam01.position.set(0, 17, 0);
+            cam01.rotation.order = "YXZ";
+
+            // Usar o canvas fixo que já existe no DOM (não appenda dinamicamente para evitar tela preta ao trocar abas)
+            const mainCanvas = mainMountRef.current.querySelector('canvas');
+            const mainRenderer = new THREE.WebGLRenderer({ canvas: mainCanvas, antialias: true, powerPreference: "high-performance" });
+            if (initWidth > 0 && initHeight > 0) {
+                mainRenderer.setSize(initWidth, initHeight, false);
+            }
+            mainRenderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.75));
+
+            // Prevenir perda de contexto WebGL
+            const handleContextLost = (e) => {
+                e.preventDefault();
+            };
+            mainRenderer.domElement.addEventListener('webglcontextlost', handleContextLost, false);
+
+            // 5. CONFIGURAÇÃO DAS 4 CÂMERAS FIXAS (CAM 02, 03, 04, 05)
+            const fixedCamSpecs = {
+                2: { pos: [34, 13, -10], look: [22, 1.5, -22], fov: 44 },   // CAM 02 -> Av. Norte-Leste
+                3: { pos: [-10, 14, -8], look: [-24, 2.0, -18], fov: 45 },  // CAM 03 -> Reserva Florestal Oeste
+                4: { pos: [10, 14, 10], look: [22, 3.0, 22], fov: 45 },     // CAM 04 -> Galpão Comercial Sul-Leste
+                5: { pos: [-18, 12, 22], look: [0, 0, 0], fov: 48 }         // CAM 05 -> Cruzamento Central / Sudoeste
+            };
+
+            const fixedCams = {};
+            const fixedRenderers = {};
+            const canvasRefs = { 2: cam2CanvasRef, 3: cam3CanvasRef, 4: cam4CanvasRef, 5: cam5CanvasRef };
+
+            [2, 3, 4, 5].forEach(id => {
+                const cvs = canvasRefs[id].current;
+                if (!cvs) return;
+                const spec = fixedCamSpecs[id];
+                const cw = cvs.clientWidth || 220;
+                const ch = cvs.clientHeight || 110;
+                const cam = new THREE.PerspectiveCamera(spec.fov, cw / ch, 0.5, 350);
+                cam.position.set(spec.pos[0], spec.pos[1], spec.pos[2]);
+                cam.lookAt(spec.look[0], spec.look[1], spec.look[2]);
+                fixedCams[id] = cam;
+
+                const rend = new THREE.WebGLRenderer({ canvas: cvs, antialias: false, powerPreference: "default" });
+                if (cw > 0 && ch > 0) {
+                    rend.setSize(cw, ch, false);
+                }
+                rend.domElement.addEventListener('webglcontextlost', handleContextLost, false);
+                fixedRenderers[id] = rend;
+            });
+
+            let expandedRenderer = null;
+
+            // 6. CONTROLE EXCLUSIVO PELO MOUSE (POINTER DRAG + WHEEL ZOOM) COM TRAVA RÍGIDA
+            let isDragging = false;
+            let prevX = 0;
+            let prevY = 0;
+
+            const onPointerDown = (e) => {
+                isDragging = true;
+                prevX = e.clientX;
+                prevY = e.clientY;
+                container.style.cursor = "grabbing";
+            };
+
+            const onPointerMove = (e) => {
+                if (!isDragging) return;
+                const dx = e.clientX - prevX;
+                const dy = e.clientY - prevY;
+                prevX = e.clientX;
+                prevY = e.clientY;
+
+                const state = threeStateRef.current;
+                const nextYaw = state.targetYaw - dx * 0.0042;
+                const nextPitch = state.targetPitch - dy * 0.0038;
+
+                state.targetYaw = Math.max(BASE_YAW - YAW_LIMIT, Math.min(BASE_YAW + YAW_LIMIT, nextYaw));
+                state.targetPitch = Math.max(PITCH_MIN, Math.min(PITCH_MAX, nextPitch));
+            };
+
+            const onPointerUp = () => {
+                isDragging = false;
+                container.style.cursor = "grab";
+            };
+
+            const onWheel = (e) => {
+                e.preventDefault();
+                const state = threeStateRef.current;
+                state.targetFov = Math.max(35, Math.min(65, state.targetFov + e.deltaY * 0.025));
+            };
+
+            container.addEventListener("pointerdown", onPointerDown);
+            window.addEventListener("pointermove", onPointerMove);
+            window.addEventListener("pointerup", onPointerUp);
+            container.addEventListener("wheel", onWheel, { passive: false });
+
+            // Robust ResizeObserver for container resizing and fullscreen modal changes
+            const resizeObserver = new ResizeObserver((entries) => {
+                for (let entry of entries) {
+                    const width = entry.contentRect.width;
+                    const height = entry.contentRect.height;
+                    if (width > 0 && height > 0) {
+                        cam01.aspect = width / height;
+                        cam01.updateProjectionMatrix();
+                        mainRenderer.setSize(width, height, false);
+                    }
+                }
+            });
+            resizeObserver.observe(container);
+
+            // 7. LOOP DE RENDERIZAÇÃO OTIMIZADO
+            let animFrameId;
+            let frameCount = 0;
+
+            const animate = (time) => {
+                animFrameId = requestAnimationFrame(animate);
+                frameCount++;
+                const state = threeStateRef.current;
+
+                // Interpolação suave da rotação da CAM 01
+                state.currentYaw += (state.targetYaw - state.currentYaw) * 0.12;
+                state.currentPitch += (state.targetPitch - state.currentPitch) * 0.12;
+                cam01.rotation.y = state.currentYaw;
+                cam01.rotation.x = state.currentPitch;
+
+                if (Math.abs(cam01.fov - state.targetFov) > 0.05) {
+                    cam01.fov += (state.targetFov - cam01.fov) * 0.14;
+                    cam01.updateProjectionMatrix();
+                }
+
+                // Atualizar posição e cor do foco de incêndio conforme a ocorrência selecionada
+                fireGroup.position.lerp(state.firePos, 0.25);
+                const ringColor = state.fireSeverity === "Crítico" ? 0xef4444 : state.fireSeverity === "Alto" ? 0xf97316 : 0xf59e0b;
+                heatDisk.material.color.setHex(ringColor);
+                riskRing.material.color.setHex(ringColor);
+                riskRing.material.opacity = 0.5 + Math.sin(time * 0.006) * 0.4;
+
+                // Animar chamas e fumaça
+                for (let i = 0; i < flames.length; i++) {
+                    flames[i].scale.y = 0.85 + Math.sin(time * 0.012 + i) * 0.28;
+                }
+                for (let s = 0; s < smokes.length; s++) {
+                    smokes[s].position.y += 0.045;
+                    if (smokes[s].position.y > 13) smokes[s].position.y = 1.5;
+                }
+
+                // Veículo patrulha na via Norte-Sul
+                patrolCar.position.z += 0.25;
+                if (patrolCar.position.z > 65) patrolCar.position.z = -65;
+
+                // Renderizar CAM 01 Principal (apenas se dimensões válidas)
+                if (container.clientWidth > 0 && container.clientHeight > 0) {
+                    mainRenderer.render(scene, cam01);
+                }
+
+                // Renderizar miniaturas fixas (CAM 02..05) a 30fps alternados
+                if (frameCount % 2 === 0) {
+                    [2, 3, 4, 5].forEach(id => {
+                        const cvs = canvasRefs[id].current;
+                        const rend = fixedRenderers[id];
+                        const cam = fixedCams[id];
+                        if (cvs && rend && cam) {
+                            const cw = cvs.clientWidth;
+                            const ch = cvs.clientHeight;
+                            if (cw > 0 && ch > 0) {
+                                if (rend.domElement.width !== cw || rend.domElement.height !== ch) {
+                                    rend.setSize(cw, ch, false);
+                                    cam.aspect = cw / ch;
+                                    cam.updateProjectionMatrix();
+                                }
+                                rend.render(scene, cam);
+                            }
+                        }
+                    });
+                }
+
+                // Renderizar Modal Ampliado se aberto com validação robusta de dimensões
+                if (state.expandedCamId && expandedCanvasRef.current && fixedCams[state.expandedCamId]) {
+                    const expCvs = expandedCanvasRef.current;
+                    if (!expandedRenderer) {
+                        expandedRenderer = new THREE.WebGLRenderer({ canvas: expCvs, antialias: true, powerPreference: "high-performance" });
+                        expandedRenderer.domElement.addEventListener('webglcontextlost', handleContextLost, false);
+                    }
+                    const ew = expCvs.clientWidth;
+                    const eh = expCvs.clientHeight;
+                    if (ew > 0 && eh > 0) {
+                        if (expandedRenderer.domElement.width !== ew || expandedRenderer.domElement.height !== eh) {
+                            expandedRenderer.setSize(ew, eh, false);
+                        }
+                        const cam = fixedCams[state.expandedCamId];
+                        cam.aspect = ew / eh;
+                        cam.updateProjectionMatrix();
+                        expandedRenderer.render(scene, cam);
+                    }
+                } else if (!state.expandedCamId && expandedRenderer) {
+                    expandedRenderer.dispose();
+                    expandedRenderer = null;
+                }
+
+                // Atualizar HUD numérico a cada 12 frames
+                if (frameCount % 12 === 0) {
+                    setHudAngles({
+                        yawDeg: Math.round(((state.currentYaw - BASE_YAW) * 180) / Math.PI),
+                        pitchDeg: Math.round((state.currentPitch * 180) / Math.PI),
+                        fov: Math.round(cam01.fov)
+                    });
+                }
+            };
+
+            animFrameId = requestAnimationFrame(animate);
+
+            return () => {
+                cancelAnimationFrame(animFrameId);
+                resizeObserver.disconnect();
+                container.removeEventListener("pointerdown", onPointerDown);
+                window.removeEventListener("pointermove", onPointerMove);
+                window.removeEventListener("pointerup", onPointerUp);
+                container.removeEventListener("wheel", onWheel);
+                mainRenderer.dispose();
+                Object.values(fixedRenderers).forEach(r => r.dispose());
+                if (expandedRenderer) expandedRenderer.dispose();
+            };
+        }, []);
+
+        const filteredIncidents = useMemo(() => {
+                if (severityFilter === "Todos") return incidents;
+                return incidents.filter(i => i.severity === severityFilter);
+            }, [incidents, severityFilter]);
+
+            const criticalCount = incidents.filter(i => i.severity === "Crítico" && i.status !== "Controlado").length;
+            const activeCount = incidents.filter(i => i.status !== "Controlado").length;
+
+            return (
+                <div className="flex flex-col h-full w-full bg-slate-100 text-slate-800">
+                    {/* TOAST FEEDBACK */}
+                    {toast && (
+                        <div className="fixed top-20 right-6 z-50 pointer-events-none">
+                            <div className={`px-4 py-3 rounded-xl shadow-xl border text-xs font-semibold flex items-center gap-2 ${
+                                toast.type === "error"
+                                    ? "bg-red-600 text-white border-red-500"
+                                    : toast.type === "success"
+                                    ? "bg-emerald-700 text-white border-emerald-600"
+                                    : "bg-slate-900 text-cyan-300 border-slate-700"
+                            }`}>
+                                <Icon name="radio" className="w-4 h-4" />
+                                <span>{toast.msg}</span>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* CABEÇALHO INSTITUCIONAL */}
+                    <header className="bg-slate-900 text-white h-16 px-5 flex items-center justify-between border-b border-slate-800 shadow-md shrink-0 z-20">
+                        <div className="flex items-center gap-3.5">
+                            <div className="flex items-center gap-2 bg-red-600 px-3 py-1.5 rounded-lg font-bold tracking-wider text-sm shadow">
+                                <Icon name="shield-alert" className="w-5 h-5" />
+                                <span>ARCHANGEL</span>
+                            </div>
+                            <div className="hidden md:block h-5 w-px bg-slate-700" />
+                            <span className="text-xs uppercase tracking-widest text-slate-400 hidden md:inline">
+                                Unidade de Suporte Inteligente para Bombeiros
+                            </span>
+                        </div>
+
+                        <div className="flex items-center gap-4">
+                            <div className="hidden lg:flex items-center gap-2 bg-slate-800 px-3 py-1.5 rounded-full border border-slate-700 text-xs">
+                                <span className="w-2 h-2 rounded-full bg-emerald-500 animate-ping" />
+                                <span className="text-emerald-400 font-semibold">CENTRAL OPERACIONAL ATIVA</span>
+                            </div>
+
+                            <div className="bg-slate-800 px-3 py-1.5 rounded-lg border border-slate-700 flex items-center gap-2 text-xs font-mono text-cyan-400">
+                                <Icon name="clock" className="w-3.5 h-3.5 text-slate-400" />
+                                <span>{clock}</span>
+                            </div>
+
+                            <button
+                                onClick={handleResetAll}
+                                className="bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition"
+                                title="Restaurar frota e ocorrências"
+                            >
+                                <Icon name="rotate-ccw" className="w-3.5 h-3.5 text-amber-400" />
+                                <span className="hidden sm:inline">Reiniciar</span>
+                            </button>
+                        </div>
+                    </header>
+
+                    {/* CORPO PRINCIPAL */}
+                    <div className="flex flex-1 overflow-hidden">
+                        {/* MENU LATERAL */}
+                        <aside className="w-16 lg:w-60 bg-slate-900 text-slate-300 flex flex-col justify-between border-r border-slate-800 shrink-0">
+                            <nav className="p-2.5 space-y-1">
+                                {[
+                                    { id: "monitoramento", label: "Monitoramento", icon: "cctv" },
+                                    { id: "ocorrencias", label: "Ocorrências", icon: "alert-triangle", badge: activeCount },
+                                    { id: "inteligencia", label: "Inteligência", icon: "cpu" },
+                                    { id: "sensores", label: "Sensores", icon: "activity" },
+                                    { id: "historico", label: "Histórico", icon: "history" }
+                                ].map(nav => (
+                                    <button
+                                        key={nav.id}
+                                        onClick={() => setActiveTab(nav.id)}
+                                        className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl font-medium text-sm transition ${
+                                            activeTab === nav.id
+                                                ? "bg-red-600 text-white shadow"
+                                                : "hover:bg-slate-800 text-slate-300 hover:text-white"
+                                        }`}
+                                    >
+                                        <Icon name={nav.icon} className="w-5 h-5" />
+                                        <span className="hidden lg:inline">{nav.label}</span>
+                                        {nav.badge !== undefined && (
+                                            <span className="ml-auto bg-slate-950/60 text-white text-[10px] px-2 py-0.5 rounded-full hidden lg:inline font-bold">
+                                                {nav.badge}
+                                            </span>
+                                        )}
+                                    </button>
+                                ))}
+                            </nav>
+
+                            {/* RESUMO ESTOQUE QUARTEL */}
+                            <div className="p-3 border-t border-slate-800 hidden lg:block">
+                                <div className="bg-slate-800/80 rounded-xl p-3 border border-slate-700/70 text-xs space-y-2">
+                                    <div className="flex items-center justify-between font-bold text-slate-200">
+                                        <span>Quartel Base 193</span>
+                                        <span className="text-[10px] text-emerald-400">PRONTO</span>
+                                    </div>
+                                    <div className="grid grid-cols-3 gap-1.5 text-center">
+                                        <div className="bg-slate-900 p-1.5 rounded-lg">
+                                            <span className="block font-bold text-white text-sm">{availableFleet.viaturas}/10</span>
+                                            <span className="text-[9px] text-slate-400">Viaturas</span>
+                                        </div>
+                                        <div className="bg-slate-900 p-1.5 rounded-lg">
+                                            <span className="block font-bold text-white text-sm">{availableFleet.caminhoes}/3</span>
+                                            <span className="text-[9px] text-slate-400">Caminhões</span>
+                                        </div>
+                                        <div className="bg-slate-900 p-1.5 rounded-lg">
+                                            <span className="block font-bold text-white text-sm">{availableFleet.bombeiros}/20</span>
+                                            <span className="text-[9px] text-slate-400">Efetivo</span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </aside>
+
+                        {/* ÁREA CENTRAL DE CONTEÚDO */}
+                        <main className="flex-1 overflow-y-auto p-4 md:p-5 flex flex-col gap-4">
+                            {/* PAINEL SUPERIOR DE KPIs */}
+                            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+                                <div className="bg-white p-3 rounded-xl border border-slate-200 shadow-sm">
+                                    <div className="flex items-center justify-between text-slate-500 text-[11px] font-semibold">
+                                        <span>Temp. Máx. Foco</span>
+                                        <Icon name="thermometer" className="w-4 h-4 text-red-500" />
+                                    </div>
+                                    <p className="text-lg font-bold text-slate-800 mt-1">{selectedIncident.temp}</p>
+                                    <span className="text-[10px] text-slate-500 block truncate">{selectedIncident.id}</span>
+                                </div>
+
+                                <div className="bg-white p-3 rounded-xl border border-slate-200 shadow-sm">
+                                    <div className="flex items-center justify-between text-slate-500 text-[11px] font-semibold">
+                                        <span>Sensores Ativos</span>
+                                        <Icon name="radio" className="w-4 h-4 text-emerald-500" />
+                                    </div>
+                                    <p className="text-lg font-bold text-slate-800 mt-1">64 / 64</p>
+                                    <span className="text-[10px] text-emerald-600 font-medium block">Malha 100% online</span>
+                                </div>
+
+                                <div className="bg-white p-3 rounded-xl border border-slate-200 shadow-sm">
+                                    <div className="flex items-center justify-between text-slate-500 text-[11px] font-semibold">
+                                        <span>Câmeras Conectadas</span>
+                                        <Icon name="video" className="w-4 h-4 text-blue-600" />
+                                    </div>
+                                    <p className="text-lg font-bold text-slate-800 mt-1">5 / 5</p>
+                                    <span className="text-[10px] text-slate-500 block">1 Torre PTZ + 4 Fixas</span>
+                                </div>
+
+                                <div className="bg-white p-3 rounded-xl border border-slate-200 shadow-sm">
+                                    <div className="flex items-center justify-between text-slate-500 text-[11px] font-semibold">
+                                        <span>Ocorrências</span>
+                                        <Icon name="alert-circle" className="w-4 h-4 text-amber-500" />
+                                    </div>
+                                    <p className="text-lg font-bold text-slate-800 mt-1">{activeCount} Ativas</p>
+                                    <span className="text-[10px] text-slate-500 block">3 setores distintos</span>
+                                </div>
+
+                                <div className="bg-white p-3 rounded-xl border border-slate-200 shadow-sm border-l-4 border-l-red-600">
+                                    <div className="flex items-center justify-between text-slate-500 text-[11px] font-semibold">
+                                        <span>Alertas Críticos</span>
+                                        <Icon name="flame" className="w-4 h-4 text-red-600" />
+                                    </div>
+                                    <p className="text-lg font-bold text-red-600 mt-1">{criticalCount}</p>
+                                    <span className="text-[10px] text-red-600 font-semibold block">Prioridade Máxima</span>
+                                </div>
+
+                                <div className="bg-white p-3 rounded-xl border border-slate-200 shadow-sm">
+                                    <div className="flex items-center justify-between text-slate-500 text-[11px] font-semibold">
+                                        <span>Frota Disponível</span>
+                                        <Icon name="truck" className="w-4 h-4 text-slate-700" />
+                                    </div>
+                                    <p className="text-sm font-bold text-slate-800 mt-1">
+                                        {availableFleet.viaturas} VTR • {availableFleet.caminhoes} ABT
+                                    </p>
+                                    <span className="text-[10px] text-emerald-600 font-semibold block">
+                                        {availableFleet.bombeiros} Bombeiros no quartel
+                                    </span>
+                                </div>
+                            </div>
+
+                            {/* ==================== ABA: MONITORAMENTO ==================== */}
+                            <div className="grid grid-cols-1 xl:grid-cols-12 gap-4" style={{display: activeTab === "monitoramento" ? undefined : "none"}}>
+                                    {/* COLUNA ESQUERDA: CAM 01 PTZ (CONTROLE EXCLUSIVO MOUSE) + 4 CÂMERAS FIXAS */}
+                                    <div className="xl:col-span-8 flex flex-col gap-3.5">
+                                        <div className="bg-slate-900 rounded-2xl overflow-hidden shadow-lg border border-slate-800">
+                                            {/* Barra Superior da CAM 01 */}
+                                            <div className="bg-slate-800/95 px-4 py-2.5 flex flex-wrap items-center justify-between gap-2 border-b border-slate-700">
+                                                <div className="flex items-center gap-2.5">
+                                                    <span className="w-2.5 h-2.5 rounded-full bg-red-500 animate-ping" />
+                                                    <div>
+                                                        <h2 className="text-white font-bold text-sm">
+                                                            CAM 01 — Torre Central PTZ [0, 17, 0]
+                                                        </h2>
+                                                        <p className="text-[11px] text-slate-400 font-mono">
+                                                            Alvo: {selectedIncident.id} ({selectedIncident.shortTitle}) • Trava Angular: ±77°
+                                                        </p>
+                                                    </div>
+                                                </div>
+                                                <span className="bg-red-500/20 text-red-400 border border-red-500/40 text-xs px-2.5 py-1 rounded-lg font-mono font-bold">
+                                                    {selectedIncident.temp}
+                                                </span>
+                                            </div>
+
+                                            {/* VISOR 3D CAM 01 — APENAS MOUSE (ARRASTAR + SCROLL) SEM BOTÕES NA TELA */}
+                                            <div
+                                                ref={mainMountRef}
+                                                style={{ cursor: "grab" }}
+                                                className="relative w-full h-[350px] md:h-[410px] bg-slate-950 overflow-hidden select-none"
+                                            >
+                                                <canvas className="absolute inset-0 w-full h-full block" />
+                                                {/* HUD Minimalista Informativa (pointer-events-none para não atrapalhar o mouse) */}
+                                                <div className="absolute inset-0 pointer-events-none p-3.5 flex flex-col justify-between z-10">
+                                                    <div className="flex justify-between items-start">
+                                                        <div className="bg-slate-900/80 backdrop-blur-sm border border-slate-700/80 px-3 py-2 rounded-xl text-white text-[11px] font-mono space-y-0.5">
+                                                            <p className="text-emerald-400 font-bold">PTZ TORRE CENTRAL • FIXA NO POSTE</p>
+                                                            <p className="text-slate-300">
+                                                                Yaw: {hudAngles.yawDeg}° | Pitch: {hudAngles.pitchDeg}° | FOV: {hudAngles.fov}°
+                                                            </p>
+                                                        </div>
+                                                        <div className="bg-slate-900/80 backdrop-blur-sm border border-slate-700/80 px-2.5 py-1 rounded-lg text-[10px] font-mono text-cyan-300">
+                                                            Arraste p/ girar • Scroll p/ zoom
+                                                        </div>
+                                                    </div>
+
+                                                    <div className="flex justify-between items-end">
+                                                        <div className="bg-slate-900/85 backdrop-blur-sm border border-slate-700/80 px-3 py-1.5 rounded-xl text-[11px] text-slate-200">
+                                                            Coordenadas Foco:{" "}
+                                                            <span className="font-mono text-amber-400 font-bold">
+                                                                [{selectedIncident.coords.join(", ")}]
+                                                            </span>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </div>
+
+                                        {/* 4 CÂMERAS FIXAS SECUNDÁRIAS (CLIQUE PARA AMPLIAR EM MODAL) */}
+                                        <div>
+                                            <div className="flex items-center justify-between mb-2 px-1">
+                                                <span className="text-xs font-bold uppercase tracking-wider text-slate-600">
+                                                    Câmeras Fixas Setoriais (Clique para Ampliar)
+                                                </span>
+                                                <span className="text-[11px] font-semibold text-red-700 bg-red-100 px-2.5 py-0.5 rounded-full">
+                                                    Câmera da Área Ativa: {selectedIncident.fixedCamLabel}
+                                                </span>
+                                            </div>
+
+                                            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                                                {[
+                                                    { id: 2, name: "CAM 02", area: "Av. Norte-Leste", temp: "480°C", ref: cam2CanvasRef, color: "text-red-400" },
+                                                    { id: 3, name: "CAM 03", area: "Floresta Oeste", temp: "340°C", ref: cam3CanvasRef, color: "text-orange-400" },
+                                                    { id: 4, name: "CAM 04", area: "Comercial Sul-Leste", temp: "195°C", ref: cam4CanvasRef, color: "text-amber-400" },
+                                                    { id: 5, name: "CAM 05", area: "Cruzamento Central", temp: "27.4°C", ref: cam5CanvasRef, color: "text-emerald-400" }
+                                                ].map(cam => {
+                                                    const isHighlighted = selectedIncident.fixedCamId === cam.id;
+                                                    return (
+                                                        <div
+                                                            key={cam.id}
+                                                            onClick={() => setExpandedCamId(cam.id)}
+                                                            className={`group cursor-pointer bg-slate-900 rounded-xl overflow-hidden border-2 shadow-sm transition hover:scale-[1.02] ${
+                                                                isHighlighted
+                                                                    ? "border-red-500 ring-2 ring-red-500/40"
+                                                                    : "border-slate-700 hover:border-slate-500"
+                                                            }`}
+                                                        >
+                                                            <div className="relative h-24 bg-slate-950">
+                                                                <canvas ref={cam.ref} className="w-full h-full block" />
+                                                                <div className="absolute inset-0 scanline pointer-events-none" />
+                                                                {isHighlighted && (
+                                                                    <span className="absolute top-1.5 left-1.5 bg-red-600 text-white text-[9px] font-bold px-1.5 py-0.5 rounded">
+                                                                        ÁREA DO ALERTA
+                                                                    </span>
+                                                                )}
+                                                                <span className="absolute top-1.5 right-1.5 bg-slate-900/80 text-white p-1 rounded">
+                                                                    <Icon name="maximize-2" className="w-3 h-3" />
+                                                                </span>
+                                                            </div>
+                                                            <div className="p-2 bg-slate-900 border-t border-slate-800">
+                                                                <div className="flex justify-between items-center">
+                                                                    <span className="text-[11px] font-bold text-white">{cam.name} (Fixa)</span>
+                                                                    <span className={`text-[10px] font-mono font-bold ${cam.color}`}>{cam.temp}</span>
+                                                                </div>
+                                                                <p className="text-[10px] text-slate-400 truncate">{cam.area}</p>
+                                                            </div>
+                                                        </div>
+                                                    );
+                                                })}
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    {/* COLUNA DIREITA: 3 OCORRÊNCIAS DISTINTAS + INTELIGÊNCIA OPERACIONAL */}
+                                    <div className="xl:col-span-4 flex flex-col gap-3.5">
+                                        {/* LISTA DAS 3 OCORRÊNCIAS */}
+                                        <div className="bg-white rounded-2xl p-4 border border-slate-200 shadow-sm">
+                                            <div className="flex items-center justify-between pb-2.5 border-b border-slate-100 mb-3">
+                                                <h3 className="font-bold text-slate-800 text-sm flex items-center gap-2">
+                                                    <Icon name="siren" className="w-4 h-4 text-red-600" /> Ocorrências Identificadas (3)
+                                                </h3>
+                                                <span className="text-[10px] text-slate-500">Clique p/ girar CAM 01</span>
+                                            </div>
+
+                                            <div className="space-y-2.5">
+                                                {incidents.map(inc => {
+                                                    const isSelected = inc.id === selectedId;
+                                                    const badgeStyle =
+                                                        inc.severity === "Crítico"
+                                                            ? "bg-red-100 text-red-700"
+                                                            : inc.severity === "Alto"
+                                                            ? "bg-orange-100 text-orange-700"
+                                                            : "bg-amber-100 text-amber-700";
+                                                    return (
+                                                        <div
+                                                            key={inc.id}
+                                                            onClick={() => handleSelectIncident(inc, false)}
+                                                            className={`p-3 rounded-xl border cursor-pointer transition ${
+                                                                isSelected
+                                                                    ? "border-red-500 bg-red-50/70 shadow-sm"
+                                                                    : "border-slate-200 bg-slate-50 hover:border-slate-300"
+                                                            }`}
+                                                        >
+                                                            <div className="flex items-center justify-between mb-1">
+                                                                <span className="text-xs font-bold text-slate-800">
+                                                                    {inc.id} • {inc.shortTitle}
+                                                                </span>
+                                                                <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${badgeStyle}`}>
+                                                                    {inc.severity}
+                                                                </span>
+                                                            </div>
+                                                            <p className="text-[11px] text-slate-500 mb-1.5">{inc.location}</p>
+                                                            <div className="flex items-center justify-between text-[10px] font-mono">
+                                                                <span className="bg-white border border-slate-200 px-2 py-0.5 rounded text-slate-700 font-semibold">
+                                                                    {inc.fixedCamLabel}
+                                                                </span>
+                                                                <span className="text-red-600 font-bold">{inc.temp}</span>
+                                                            </div>
+                                                        </div>
+                                                    );
+                                                })}
+                                            </div>
+                                        </div>
+
+                                        {/* WIDGET ARCHANGEL INTELLIGENCE (DESPACHO PROPORCIONAL) */}
+                                        <div className="bg-slate-900 text-white rounded-2xl p-4 shadow-lg border border-slate-800 flex flex-col justify-between flex-1">
+                                            <div>
+                                                <div className="flex items-center justify-between mb-2">
+                                                    <h3 className="font-bold text-sm text-cyan-400 flex items-center gap-2">
+                                                        <Icon name="cpu" className="w-4 h-4" /> Archangel Intelligence
+                                                    </h3>
+                                                    <span className="text-[10px] font-mono bg-cyan-950 text-cyan-300 px-2 py-0.5 rounded border border-cyan-800">
+                                                        {selectedIncident.id}
+                                                    </span>
+                                                </div>
+                                                <p className="text-xs font-bold text-white mb-0.5">{selectedIncident.title}</p>
+                                                <p className="text-[11px] text-slate-400 mb-3">{selectedIncident.location}</p>
+
+                                                <div className="bg-slate-800/90 p-3 rounded-xl border border-slate-700 text-xs space-y-2 mb-3">
+                                                    <div className="flex justify-between">
+                                                        <span className="text-slate-400">Sugestão Proporcional:</span>
+                                                        <span className="text-amber-400 font-bold uppercase">{selectedIncident.severity}</span>
+                                                    </div>
+                                                    <div className="grid grid-cols-3 gap-1.5 text-center pt-1">
+                                                        <div className="bg-slate-950 p-1.5 rounded-lg border border-slate-800">
+                                                            <span className="block text-sm font-bold text-amber-400">{selectedIncident.viaturas}</span>
+                                                            <span className="text-[9px] text-slate-400">VIATURAS</span>
+                                                        </div>
+                                                        <div className="bg-slate-950 p-1.5 rounded-lg border border-slate-800">
+                                                            <span className="block text-sm font-bold text-amber-400">{selectedIncident.caminhoes}</span>
+                                                            <span className="text-[9px] text-slate-400">CAMINHÕES</span>
+                                                        </div>
+                                                        <div className="bg-slate-950 p-1.5 rounded-lg border border-slate-800">
+                                                            <span className="block text-sm font-bold text-amber-400">{selectedIncident.bombeiros}</span>
+                                                            <span className="text-[9px] text-slate-400">BOMBEIROS</span>
+                                                        </div>
+                                                    </div>
+
+                                                    <div className={`p-2 rounded-lg border text-[11px] font-semibold flex items-center gap-2 ${
+                                                        selectedIncident.samu
+                                                            ? "bg-red-950/70 border-red-700 text-red-300"
+                                                            : "bg-emerald-950/60 border-emerald-800 text-emerald-300"
+                                                    }`}>
+                                                        <Icon name="ambulance" className="w-4 h-4 shrink-0" />
+                                                        <span>SAMU: {selectedIncident.samuDetail}</span>
+                                                    </div>
+                                                </div>
+                                            </div>
+
+                                            <div className="flex gap-2">
+                                                <button
+                                                    onClick={() => handleDispatch(selectedIncident)}
+                                                    disabled={selectedIncident.dispatched || selectedIncident.status === "Controlado"}
+                                                    className={`flex-1 py-2.5 px-3 rounded-xl text-xs font-bold transition flex items-center justify-center gap-1.5 ${
+                                                        selectedIncident.dispatched
+                                                            ? "bg-amber-600 text-white cursor-not-allowed"
+                                                            : selectedIncident.status === "Controlado"
+                                                            ? "bg-emerald-700 text-white cursor-not-allowed"
+                                                            : "bg-red-600 hover:bg-red-700 text-white shadow"
+                                                    }`}
+                                                >
+                                                    <Icon name="send" className="w-3.5 h-3.5" />
+                                                    <span>
+                                                        {selectedIncident.dispatched
+                                                            ? "Equipe em Operação"
+                                                            : selectedIncident.status === "Controlado"
+                                                            ? "Ocorrência Controlada"
+                                                            : "Autorizar Despacho"}
+                                                    </span>
+                                                </button>
+                                                <button
+                                                    onClick={() => setExpandedCamId(selectedIncident.fixedCamId)}
+                                                    className="bg-slate-800 hover:bg-slate-700 text-cyan-400 px-3 py-2.5 rounded-xl border border-slate-700 transition"
+                                                    title="Ampliar câmera fixa da área"
+                                                >
+                                                    <Icon name="maximize-2" className="w-4 h-4" />
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                            {/* ==================== ABA: OCORRÊNCIAS ==================== */}
+                            {activeTab === "ocorrencias" && (
+                                <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm">
+                                    <div className="flex flex-wrap items-center justify-between gap-3 pb-4 border-b border-slate-100 mb-4">
+                                        <div>
+                                            <h2 className="text-lg font-bold text-slate-800">Central de Ocorrências</h2>
+                                            <p className="text-xs text-slate-500">Filtre por gravidade ou foque a CAM 01 PTZ diretamente na ocorrência.</p>
+                                        </div>
+                                        <div className="flex gap-1.5">
+                                            {["Todos", "Crítico", "Alto", "Moderado"].map(sev => (
+                                                <button
+                                                    key={sev}
+                                                    onClick={() => setSeverityFilter(sev)}
+                                                    className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
+                                                        severityFilter === sev
+                                                            ? "bg-slate-900 text-white"
+                                                            : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+                                                    }`}
+                                                >
+                                                    {sev}
+                                                </button>
+                                            ))}
+                                        </div>
+                                    </div>
+
+                                    <div className="overflow-x-auto">
+                                        <table className="w-full text-left border-collapse text-sm">
+                                            <thead>
+                                                <tr className="border-b border-slate-200 text-slate-400 text-xs uppercase">
+                                                    <th className="py-3 px-3">ID / Ocorrência</th>
+                                                    <th className="py-3 px-3">Localização</th>
+                                                    <th className="py-3 px-3">Horário</th>
+                                                    <th className="py-3 px-3">Temp.</th>
+                                                    <th className="py-3 px-3">Gravidade</th>
+                                                    <th className="py-3 px-3">Câmera Área</th>
+                                                    <th className="py-3 px-3">Status</th>
+                                                    <th className="py-3 px-3 text-right">Ações</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody className="divide-y divide-slate-100">
+                                                {filteredIncidents.map(inc => (
+                                                    <tr key={inc.id} className="hover:bg-slate-50">
+                                                        <td className="py-3 px-3 font-bold text-slate-800">
+                                                            {inc.id} — {inc.shortTitle}
+                                                        </td>
+                                                        <td className="py-3 px-3 text-xs text-slate-600">{inc.location}</td>
+                                                        <td className="py-3 px-3 font-mono text-xs">{inc.time}</td>
+                                                        <td className="py-3 px-3 font-mono font-bold text-red-600">{inc.temp}</td>
+                                                        <td className="py-3 px-3">
+                                                            <span className={`px-2 py-0.5 rounded-full text-xs font-bold ${
+                                                                inc.severity === "Crítico"
+                                                                    ? "bg-red-100 text-red-700"
+                                                                    : inc.severity === "Alto"
+                                                                    ? "bg-orange-100 text-orange-700"
+                                                                    : "bg-amber-100 text-amber-700"
+                                                            }`}>
+                                                                {inc.severity}
+                                                            </span>
+                                                        </td>
+                                                        <td className="py-3 px-3 font-mono text-xs">{inc.fixedCamLabel}</td>
+                                                        <td className="py-3 px-3 text-xs font-semibold text-slate-700">{inc.status}</td>
+                                                        <td className="py-3 px-3 text-right space-x-1.5">
+                                                            <button
+                                                                onClick={() => handleSelectIncident(inc, true)}
+                                                                className="bg-slate-900 hover:bg-slate-800 text-white px-2.5 py-1.5 rounded-lg text-xs font-semibold"
+                                                            >
+                                                                Focar Câmera
+                                                            </button>
+                                                            {inc.dispatched && (
+                                                                <button
+                                                                    onClick={() => handleResolveIncident(inc)}
+                                                                    className="bg-emerald-600 hover:bg-emerald-700 text-white px-2.5 py-1.5 rounded-lg text-xs font-semibold"
+                                                                >
+                                                                    Concluir
+                                                                </button>
+                                                            )}
+                                                        </td>
+                                                    </tr>
+                                                ))}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* ==================== ABA: INTELIGÊNCIA OPERACIONAL ==================== */}
+                            {activeTab === "inteligencia" && (
+                                <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm space-y-6">
+                                    <div className="border-b border-slate-100 pb-4">
+                                        <h2 className="text-lg font-bold text-slate-800 flex items-center gap-2">
+                                            <Icon name="cpu" className="w-5 h-5 text-red-600" /> Archangel Intelligence — Apoio à Decisão Operacional
+                                        </h2>
+                                        <p className="text-xs text-slate-500">
+                                            Dimensionamento proporcional baseado no efetivo do quartel (10 Viaturas, 3 Caminhões, 20 Bombeiros). Recomendações sujeitas à validação do operador.
+                                        </p>
+                                    </div>
+
+                                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                                        <div className="bg-slate-50 p-4 rounded-xl border border-slate-200">
+                                            <span className="text-xs text-slate-500 font-semibold">Viaturas Disponíveis</span>
+                                            <p className="text-2xl font-bold text-slate-800 mt-1">{availableFleet.viaturas} / 10</p>
+                                        </div>
+                                        <div className="bg-slate-50 p-4 rounded-xl border border-slate-200">
+                                            <span className="text-xs text-slate-500 font-semibold">Caminhões Disponíveis</span>
+                                            <p className="text-2xl font-bold text-slate-800 mt-1">{availableFleet.caminhoes} / 3</p>
+                                        </div>
+                                        <div className="bg-slate-50 p-4 rounded-xl border border-slate-200">
+                                            <span className="text-xs text-slate-500 font-semibold">Bombeiros Militares</span>
+                                            <p className="text-2xl font-bold text-slate-800 mt-1">{availableFleet.bombeiros} / 20</p>
+                                        </div>
+                                    </div>
+
+                                    <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+                                        {incidents.map(inc => (
+                                            <div key={inc.id} className="bg-slate-50 rounded-2xl p-5 border border-slate-200 flex flex-col justify-between gap-4">
+                                                <div className="space-y-2.5">
+                                                    <div className="flex justify-between items-center">
+                                                        <span className="text-xs font-mono font-bold text-slate-500">{inc.id}</span>
+                                                        <span className={`text-xs font-bold px-2.5 py-0.5 rounded-full ${
+                                                            inc.severity === "Crítico"
+                                                                ? "bg-red-100 text-red-700"
+                                                                : inc.severity === "Alto"
+                                                                ? "bg-orange-100 text-orange-700"
+                                                                : "bg-amber-100 text-amber-700"
+                                                        }`}>
+                                                            {inc.severity}
+                                                        </span>
+                                                    </div>
+                                                    <h3 className="font-bold text-slate-800 text-sm">{inc.title}</h3>
+                                                    <p className="text-xs text-slate-600"><strong>Área afetada:</strong> {inc.affectedArea}</p>
+                                                    <p className="text-xs text-slate-600"><strong>Regiões vulneráveis:</strong> {inc.vulnerable}</p>
+                                                    <div className="grid grid-cols-3 gap-2 text-center bg-white p-2.5 rounded-xl border border-slate-200">
+                                                        <div>
+                                                            <span className="block font-bold text-slate-800">{inc.viaturas}</span>
+                                                            <span className="text-[10px] text-slate-500">Viaturas</span>
+                                                        </div>
+                                                        <div>
+                                                            <span className="block font-bold text-slate-800">{inc.caminhoes}</span>
+                                                            <span className="text-[10px] text-slate-500">Caminhões</span>
+                                                        </div>
+                                                        <div>
+                                                            <span className="block font-bold text-slate-800">{inc.bombeiros}</span>
+                                                            <span className="text-[10px] text-slate-500">Bombeiros</span>
+                                                        </div>
+                                                    </div>
+                                                    <p className={`text-xs font-semibold ${inc.samu ? "text-red-600" : "text-emerald-700"}`}>
+                                                        SAMU: {inc.samuDetail}
+                                                    </p>
+                                                </div>
+
+                                                <button
+                                                    onClick={() => handleDispatch(inc)}
+                                                    disabled={inc.dispatched || inc.status === "Controlado"}
+                                                    className={`w-full py-2.5 rounded-xl text-xs font-bold transition ${
+                                                        inc.dispatched
+                                                            ? "bg-amber-600 text-white"
+                                                            : inc.status === "Controlado"
+                                                            ? "bg-emerald-600 text-white"
+                                                            : "bg-red-600 hover:bg-red-700 text-white shadow"
+                                                    }`}
+                                                >
+                                                    {inc.dispatched ? "Recursos Despachados" : inc.status === "Controlado" ? "Concluído" : "Sugerir Despacho Proporcional"}
+                                                </button>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* ==================== ABA: SENSORES ==================== */}
+                            {activeTab === "sensores" && (
+                                <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm">
+                                    <div className="pb-4 border-b border-slate-100 mb-5 flex justify-between items-center">
+                                        <div>
+                                            <h2 className="text-lg font-bold text-slate-800">Telemetria de Sensores Térmicos e Fumaça</h2>
+                                            <p className="text-xs text-slate-500">Leituras integradas com as câmeras setoriais do bairro.</p>
+                                        </div>
+                                        <span className="bg-emerald-100 text-emerald-800 text-xs font-bold px-3 py-1 rounded-lg">
+                                            64/64 Online
+                                        </span>
+                                    </div>
+                                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                                        {SENSORS_LIST.map(s => (
+                                            <div key={s.id} className="bg-slate-50 p-4 rounded-xl border border-slate-200 space-y-2">
+                                                <div className="flex justify-between items-center">
+                                                    <span className="text-xs font-mono font-bold text-slate-500">{s.id}</span>
+                                                    <span className={`text-[10px] font-bold px-2 py-0.5 rounded ${
+                                                        s.status === "Crítico"
+                                                            ? "bg-red-100 text-red-700"
+                                                            : s.status === "Alto"
+                                                            ? "bg-orange-100 text-orange-700"
+                                                            : s.status === "Moderado"
+                                                            ? "bg-amber-100 text-amber-700"
+                                                            : "bg-emerald-100 text-emerald-700"
+                                                    }`}>
+                                                        {s.status}
+                                                    </span>
+                                                </div>
+                                                <h4 className="font-bold text-slate-800 text-sm">{s.name}</h4>
+                                                <div className="flex justify-between text-xs pt-2 border-t border-slate-200 font-mono">
+                                                    <span>Temp: <strong>{s.temp}</strong></span>
+                                                    <span>Fumaça: <strong>{s.smoke}</strong></span>
+                                                    <span className="text-slate-500">{s.cam}</span>
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* ==================== ABA: HISTÓRICO ==================== */}
+                            {activeTab === "historico" && (
+                                <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm">
+                                    <div className="pb-4 border-b border-slate-100 mb-5">
+                                        <h2 className="text-lg font-bold text-slate-800">Histórico de Ocorrências Encerradas</h2>
+                                        <p className="text-xs text-slate-500">Registro operacional de atendimentos concluídos pela central.</p>
+                                    </div>
+                                    <div className="space-y-3">
+                                        {historyList.map(h => (
+                                            <div key={h.id} className="p-4 rounded-xl bg-slate-50 border border-slate-200 flex flex-wrap items-center justify-between gap-3">
+                                                <div>
+                                                    <span className="text-xs font-mono font-bold text-slate-500">{h.id} • Encerrado às {h.closedAt}</span>
+                                                    <h4 className="font-bold text-slate-800 text-sm">{h.title}</h4>
+                                                    <p className="text-xs text-slate-500">{h.location} — {h.outcome}</p>
+                                                </div>
+                                                <div className="text-right text-xs">
+                                                    <span className="block font-semibold text-slate-700">{h.resources}</span>
+                                                    <span className="text-emerald-600 font-bold">Duração: {h.duration}</span>
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                            )}
+                        </main>
+                    </div>
+
+                    {/* MODAL DE CÂMERA FIXA AMPLIADA (CAM 02, 03, 04 ou 05) */}
+                    {expandedCamId && (
+                        <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+                            <div className="bg-slate-900 rounded-2xl max-w-4xl w-full overflow-hidden shadow-2xl border border-slate-700">
+                                <div className="bg-slate-800 px-5 py-3 flex items-center justify-between border-b border-slate-700">
+                                    <div className="flex items-center gap-2.5">
+                                        <span className="w-2.5 h-2.5 rounded-full bg-red-500 animate-ping" />
+                                        <h3 className="text-white font-bold text-sm">
+                                            CAM 0{expandedCamId} — Visão Fixa Ampliada
+                                        </h3>
+                                    </div>
+                                    <button
+                                        onClick={() => setExpandedCamId(null)}
+                                        className="bg-slate-700 hover:bg-slate-600 text-white p-1.5 rounded-lg"
+                                    >
+                                        <Icon name="x" className="w-4 h-4" />
+                                    </button>
+                                </div>
+                                <div className="relative w-full h-[380px] sm:h-[450px] bg-slate-950">
+                                    <canvas ref={expandedCanvasRef} className="w-full h-full block" />
+                                    <div className="absolute inset-0 scanline pointer-events-none" />
+                                    <div className="absolute bottom-4 left-4 right-4 bg-slate-900/90 border border-slate-700 p-3 rounded-xl flex items-center justify-between text-white text-xs">
+                                        <span>Câmera fixa setorial em modo de inspeção ampliada.</span>
+                                        <button
+                                            onClick={() => setExpandedCamId(null)}
+                                            className="bg-red-600 hover:bg-red-700 px-3.5 py-1.5 rounded-lg font-bold"
+                                        >
+                                            Fechar Ampliação
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById("root"));
+        root.render(<App />);
+    </script>
+</body>
+</html>
